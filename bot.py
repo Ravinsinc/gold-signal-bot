@@ -1,48 +1,60 @@
 import os
 import re
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    filters,
+    ContextTypes
+)
 
-# Load token from environment
-TOKEN = os.environ.get("BOT_TOKEN")
-MAX_RISK = 600  # dollars per trade
+TOKEN = os.getenv("BOT_TOKEN")  # Read token from environment
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+MAX_RISK = 600  # Max USD risk per trade
+
+# Signal Parsing Function
+def parse_signal(message: str):
+    pattern = r"(buy|sell)[^\d]*(\d{4,}\.\d{1,})[^\d]+sl[^\d]*(\d{4,}\.\d{1,})"
+    match = re.search(pattern, message, re.IGNORECASE)
+    if match:
+        direction = match.group(1).upper()
+        entry_price = float(match.group(2))
+        sl_price = float(match.group(3))
+        return direction, entry_price, sl_price
+    return None
+
+# Risk Calculator
+def calculate_lot_size(entry, sl, max_risk=MAX_RISK):
+    stop_loss_ticks = abs(entry - sl) / 0.1  # MGC = $1 per 0.1 move
+    if stop_loss_ticks == 0:
+        return 0
+    contracts = int(max_risk / stop_loss_ticks)
+    return contracts
+
+# Message Handler
+async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     message = update.message.text.lower()
-    if "xauusd" in message or "gold" in message:
-        stop_loss_pips = None
 
-        # Format 1: SL: 3373.98(100PIPS)
-        sl_pip_match = re.search(r'sl[:\s@]*[\d.]+\s*\(?(\d+)\s*pips?\)?', message, re.IGNORECASE)
-        if sl_pip_match:
-            stop_loss_pips = int(sl_pip_match.group(1))
-        else:
-            # Format 2: Entry + SL values
-            prices = re.findall(r'(\d{3,4}\.\d{1,4})', message)
-            if len(prices) >= 2:
-                try:
-                    entry = float(prices[0])
-                    sl = float(prices[1])
-                    stop_loss_pips = int(abs(entry - sl) * 10)
-                except:
-                    stop_loss_pips = None
+    if "xauusd" not in message and "gold" not in message:
+        return
 
-        if stop_loss_pips:
-            pip_value = 0.10  # $0.10 per pip for MGC
-            stop_loss_dollars = stop_loss_pips * pip_value
-            num_contracts = int(MAX_RISK / stop_loss_dollars)
-
-            if num_contracts < 1:
-                response = f"⚠️ SL too large to risk ${MAX_RISK}"
-            else:
-                response = f"✅ Gold Signal\nRisk: ${MAX_RISK}\nSL: {stop_loss_pips} pips\nContracts: {num_contracts}"
-        else:
-            response = "⚠️ Could not detect stop loss in the signal."
-
+    result = parse_signal(message)
+    if result:
+        direction, entry, sl = result
+        contracts = calculate_lot_size(entry, sl)
+        response = (
+            f"📢 Signal Detected: {direction}\n"
+            f"🎯 Entry: {entry}\n"
+            f"🛑 SL: {sl}\n"
+            f"📏 Contracts: {contracts} (max $600 risk)"
+        )
         await update.message.reply_text(response)
 
+# Main App
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, signal_handler))
     app.run_polling()
-
