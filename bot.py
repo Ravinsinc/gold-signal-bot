@@ -1,67 +1,50 @@
 import os
-import logging
 import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Get token from environment variable
 TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is not set")
 
-MAX_RISK = 600
-POINT_VALUE = 10  # Micro Gold futures: $10 per point (or $1 per 0.1 pip)
+# Your max risk per trade
+MAX_RISK = 600  # dollars
+TICK_VALUE = 1.0  # $1 per tick for MGC
+TICKS_PER_PIP = 10  # 10 ticks per pip
 
-# Pattern examples for gold trade signals
+# Signal pattern examples:
 SIGNAL_PATTERNS = [
-    r"(?i)(buy|sell)(?:ing)?\s+gold|xauusd.*?(sl|stop\s*loss)[^\d]*([\d.]+)",
-    r"(?i)(buy|sell).*?xauusd.*?sl[^\d]*([\d.]+).*?([\d.]+)"
+    r"(buy|sell)\s+(xauusd|gold).*(sl\s*[:@]?\s*([\d.]+))",  # e.g. buy xauusd now sl: 1933.5
+    r"(buy|sell).*gold.*entry\s*[@]?\s*([\d.]+).*sl\s*([@\s]*([\d.]+))",  # Selling Gold @ 3324.8 Sl 3326.8
 ]
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text.lower()
-    if "xauusd" not in message_text and "gold" not in message_text:
-        return  # Not a gold signal
+async def handle_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message.text.lower()
 
-    # Try to extract direction and SL from known patterns
-    direction = "buy" if "buy" in message_text else "sell" if "sell" in message_text else None
-    if not direction:
-        return
+    for pattern in SIGNAL_PATTERNS:
+        match = re.search(pattern, message)
+        if match:
+            direction = match.group(1).upper()
+            try:
+                stop_loss_price = float(match.group(4))
+            except (IndexError, ValueError):
+                continue
 
-    sl_match = re.search(r"sl\s*[:@\-\s]*([\d.]+)[^\d]*\(?([\d]*)\s*pips?\)?", message_text)
-    if sl_match:
-        try:
-            sl_price = float(sl_match.group(1))
-            pip_value = float(sl_match.group(2)) if sl_match.group(2) else 0
-        except:
+            stop_loss_pips = abs(float(stop_loss_price))  # you may adapt based on Entry/SL
+            stop_loss_ticks = stop_loss_pips * TICKS_PER_PIP
+            risk_per_contract = stop_loss_ticks * TICK_VALUE
+
+            contracts = int(MAX_RISK / risk_per_contract)
+
+            reply = f"📡 {direction} Signal Detected\n"
+            reply += f"🔻 Stop Loss: {stop_loss_price} ({stop_loss_pips} pips)\n"
+            reply += f"🧮 Contracts to Risk $600: {contracts}"
+
+            await update.message.reply_text(reply)
             return
-    else:
-        return
 
-    # Risk logic
-    if pip_value > 0:
-        contract_size = MAX_RISK / (pip_value * 1)
-    else:
-        return
+    await update.message.reply_text("❌ Could not parse signal.")
 
-    contract_size = round(contract_size)
-
-    response = (
-        f"Signal detected: {direction.upper()} GOLD\n"
-        f"Stop Loss: {sl_price} ({pip_value} pips)\n"
-        f"Trade up to: {contract_size} micro lots to risk max ${MAX_RISK}."
-    )
-    await update.message.reply_text(response)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_signal))
     print("Bot is running...")
     app.run_polling()
