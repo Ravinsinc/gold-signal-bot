@@ -1,47 +1,58 @@
 import os
+import re
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-import re, math
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-TOKEN = os.getenv("BOT_TOKEN")
+# Get the bot token from environment variable set in Render
+TOKEN = os.environ.get("BOT_TOKEN")
+
+# Set max risk per trade in dollars
 MAX_RISK = 600
-MGC_PIP_VALUE = 1
 
-def extract_pips_or_prices(text):
-    pips_match = re.search(r'\((\d+)\s*pips?\)', text, re.IGNORECASE)
-    if pips_match:
-        return int(pips_match.group(1))
-    price_match = re.search(r'(?:sl|stop loss)[^\d]*(\d{3,5}\.\d+)', text, re.IGNORECASE)
-    entry_match = re.search(r'(?:entry|now\s*@?|market entry)[^\d]*(\d{3,5}\.\d+)', text, re.IGNORECASE)
-    if price_match and entry_match:
-        sl_price = float(price_match.group(1))
-        entry_price = float(entry_match.group(2))
-        pip_diff = abs(sl_price - entry_price) * 10
-        return round(pip_diff)
-    return None
-
-def is_gold_signal(text):
-    return any(k in text.lower() for k in ["xauusd", "gold"])
-
+# Signal detection and response logic
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    if not is_gold_signal(text):
-        return
-    sl_pips = extract_pips_or_prices(text)
-    if not sl_pips:
-        await update.message.reply_text("⚠️ Could not determine SL in pips.")
-        return
-    contracts = math.floor(MAX_RISK / (sl_pips * MGC_PIP_VALUE))
-    contracts = max(1, contracts)
-    resp = (
-        f"📩 *Gold Signal Detected*\n"
-        f"SL: `{sl_pips}` pips\n"
-        f"Max Risk: `${MAX_RISK}`\n"
-        f"✅ Use: *{contracts} MGC contracts*"
-    )
-    await update.message.reply_text(resp, parse_mode="Markdown")
+    message = update.message.text.lower()
+    if "xauusd" in message or "gold" in message:
 
-if __name__ == '__main__':
+        # Extract stop loss from message
+        stop_loss_pips = None
+
+        # Try various signal formats
+        sl_pip_match = re.search(r'sl[:\s@]*[\d.]+\s*\(?(\d+)\s*pips?\)?', message, re.IGNORECASE)
+        if sl_pip_match:
+            stop_loss_pips = int(sl_pip_match.group(1))
+        else:
+            # fallback - detect SL via two price difference logic
+            price_match = re.findall(r'(\d{3,4}\.\d{1,3})', message)
+            if len(price_match) >= 2:
+                try:
+                    entry = float(price_match[0])
+                    sl = float(price_match[1])
+                    stop_loss_pips = int(abs(entry - sl) * 10)  # for MGC (0.10 per tick)
+                except:
+                    stop_loss_pips = None
+
+        if stop_loss_pips:
+            # MGC tick value = $1.00 = 10 pips (1 pip = $0.10)
+            pip_value = 0.10
+            stop_loss_dollars = stop_loss_pips * pip_value
+            num_contracts = int(MAX_RISK / stop_loss_dollars)
+
+            if num_contracts < 1:
+                response = f"⚠️ Signal ignored: SL too large to fit risk limit (${MAX_RISK})."
+            else:
+                response = f"✅ Signal Detected!\n🟡 Gold Trade\nRisk: ${MAX_RISK} max\nSL: {stop_loss_pips} pips\n📦 Contracts: {num_contracts}"
+
+        else:
+            response = "⚠️ Couldn't determine stop loss from the signal."
+
+        await update.message.reply_text(response)
+
+# Main entry
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
+
+    # Catch all messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     app.run_polling()
